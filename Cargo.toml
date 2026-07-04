@@ -1,0 +1,99 @@
+[package]
+name = "aws-s3-explorer"
+version = "0.1.0"
+edition = "2024"
+description = "Personal AWS S3 / local file manager"
+rust-version = "1.96"
+
+[[bin]]
+name = "aws-s3-explorer"
+path = "src/main.rs"
+
+[dependencies]
+
+# ── GUI ───────────────────────────────────────────────────────────────────────
+# eframe: the egui application shell.  Provides the OS window, input event
+# loop, and wgpu GPU rendering surface.
+#   persistence – stores window geometry and panel sizes between sessions via
+#                 eframe's built-in serde-based persistence mechanism.
+#   wayland     – enables the Wayland compositor backend on Linux.
+#   x11         – enables the X11 backend on Linux.
+# Both wayland and x11 are declared unconditionally; the Windows build silently
+# ignores Linux-only platform features.
+eframe = { version = "0.35.0", features = ["persistence", "wayland", "x11"] }
+
+# egui: direct dep required so all panel types are accessible in user code.
+# MUST match eframe/egui_extras version exactly — same upstream workspace.
+egui = "0.35.0"
+
+# egui_extras: extends egui with TableBuilder (sortable, resizable columns).
+# MUST match eframe/egui version exactly — same upstream workspace.
+egui_extras = "0.35.0"
+
+# rfd (Rusty File Dialog): invokes the native OS folder/file picker dialog.
+# Windows 11 → Windows Explorer picker.
+# Ubuntu     → GTK file chooser or XDG Desktop Portal.
+# Used only for "Choose local root folder" — the main pane browsing is custom.
+rfd = "0.17.2"
+
+# ── AWS ───────────────────────────────────────────────────────────────────────
+# aws-config: resolves credentials and region with the same precedence chain
+# as AWS CLI v2: env vars → ~/.aws/credentials → ~/.aws/config → EC2 metadata.
+# "behavior-version-latest" is required since SDK 1.x to suppress a
+# compile-time warning about unset behaviour version.
+aws-config = { version = "1.8.18", features = ["behavior-version-latest"] }
+
+# aws-sdk-s3: official AWS S3 client.  Operations used:
+#   list_buckets, list_objects_v2 (with paginator + delimiter),
+#   put_object, get_object, delete_object, head_object.
+aws-sdk-s3 = "1.137.0"
+
+# ── Async ─────────────────────────────────────────────────────────────────────
+# tokio: the only async runtime supported by aws-sdk-s3.
+# We create a Runtime manually in main() (not via #[tokio::main]) so we can
+# obtain a Handle and clone it into the App struct for spawning tasks from
+# the synchronous eframe render loop.
+tokio = { version = "1.52.3", features = ["full"] }
+
+# ── Channel ───────────────────────────────────────────────────────────────────
+# flume: a channel whose Receiver::try_recv() works in synchronous (non-async)
+# code — essential for draining results inside eframe's synchronous App::ui().
+# Its Sender is Send + Sync + Clone, making it safe to hold in multiple tokio tasks.
+# Preferred over tokio::sync::mpsc here because the consumer side is synchronous.
+flume = "0.12.0"
+
+# ── Error handling ────────────────────────────────────────────────────────────
+anyhow = "1"
+
+# ── Serialisation ─────────────────────────────────────────────────────────────
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+# walkdir: recursive local directory traversal used for folder uploads.
+# Handles symlinks and per-entry permission errors gracefully.
+walkdir = "2"
+
+# humansize: BINARY format (1 KiB = 1024 bytes) for file size display.
+humansize = "2"
+
+# chrono: DateTime formatting.  serde feature required because AppSettings
+# (persisted by eframe) contains Option<DateTime<Utc>>.
+chrono = { version = "0.4", features = ["serde"] }
+
+# dirs: resolves the platform config directory without any #[cfg(target_os)] code.
+# Linux  → $XDG_CONFIG_HOME or ~/.config
+# Windows → %APPDATA% (e.g. C:\Users\Yuri\AppData\Roaming)
+dirs = "6"
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+tracing = "0.1"
+# env-filter: enable RUST_LOG=aws_s3_explorer=debug,warn at runtime.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# ── Build profiles ────────────────────────────────────────────────────────────
+[profile.release]
+opt-level = 3
+lto = true          # link-time optimisation: smaller, faster binary
+codegen-units = 1   # maximum inlining
+strip = true        # strip debug symbols (reduces binary size on Linux)

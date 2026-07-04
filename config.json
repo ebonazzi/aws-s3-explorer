@@ -1,0 +1,5 @@
+{
+  "upload_storage_class": "STANDARD",
+  "confirm_before_delete": true,
+  "max_completed_transfers_shown": 500
+}
