@@ -160,7 +160,7 @@ pub fn draw(app: &mut S3ExplorerApp, ui: &mut egui::Ui) {
     }
 
     if let Some(folder) = upload_folder {
-        app.start_folder_upload(&folder);
+        app.start_folder_upload(&folder, false);
     }
 
     if !delete_paths.is_empty() {

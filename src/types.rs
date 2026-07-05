@@ -348,6 +348,10 @@ pub enum AppMsg {
         s3_prefix: String,
         /// Target S3 bucket.
         bucket: String,
+        /// `true` if this scan is part of a drag-and-drop move: each
+        /// resulting upload should delete its local source file once it
+        /// succeeds, rather than leaving the source in place.
+        is_move: bool,
     },
     /// S3 recursive listing finished: ready to enqueue download jobs.
     S3RecursiveListComplete {
@@ -359,6 +363,10 @@ pub enum AppMsg {
         s3_prefix: String,
         /// Source S3 bucket.
         bucket: String,
+        /// `true` if this listing is part of a drag-and-drop move: each
+        /// resulting download should delete its source S3 object once it
+        /// succeeds, rather than leaving the source in place.
+        is_move: bool,
     },
 
     // ── General ───────────────────────────────────────────────────────────────

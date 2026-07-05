@@ -225,7 +225,7 @@ fn draw_prefix_contents(app: &mut S3ExplorerApp, ui: &mut egui::Ui) {
     }
 
     if let Some(folder_prefix) = download_folder {
-        app.start_folder_download(&folder_prefix);
+        app.start_folder_download(&folder_prefix, false);
     }
 }
 

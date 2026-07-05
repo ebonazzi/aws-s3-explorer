@@ -4,7 +4,7 @@
 //! the AWS S3 client, and all display state. The transfer worker task is spawned
 //! once at startup and runs for the lifetime of the process.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -12,10 +12,20 @@ use tracing::{error, info};
 
 use crate::config::AppConfig;
 use crate::types::{
-    AppMsg, AppSettings, JobId, LocalEntry, S3Entry, S3Location, SyncDirection, SyncOptions,
-    SyncPlan, TransferJob, TransferKind, TransferStatus,
+    AppMsg, AppSettings, EntryKind, JobId, LocalEntry, S3Entry, S3Location, SyncDirection,
+    SyncOptions, SyncPlan, TransferJob, TransferKind, TransferStatus,
 };
 use crate::ui;
+
+/// Accumulates the results of one or more in-flight recursive folder scans
+/// triggered by a drag-and-drop move, until every scan has reported back.
+#[derive(Debug)]
+struct PendingMoveScan {
+    /// How many recursive folder scans are still running for this drop.
+    scans_outstanding: usize,
+    /// Copy job paired with the delete job to run once that copy succeeds.
+    items: Vec<(TransferJob, TransferKind)>,
+}
 
 // ── App struct ────────────────────────────────────────────────────────────────
 
@@ -70,6 +80,18 @@ pub struct S3ExplorerApp {
     pub pending_delete_jobs: Vec<TransferJob>,
     /// Fatal startup error to display in a modal before anything else.
     pub fatal_error: Option<String>,
+
+    // ── Move (drag-and-drop) state ────────────────────────────────────────────
+    /// Copy `JobId` -> the delete job to fire once that copy succeeds.
+    move_followups: HashMap<JobId, TransferKind>,
+    /// Set while one or more recursive folder scans are outstanding for an
+    /// in-progress drag-and-drop move.
+    move_scan: Option<PendingMoveScan>,
+    /// Finalized move items, ready for the confirmation dialog or immediate execution.
+    pending_move_items: Vec<(TransferJob, TransferKind)>,
+    pub show_move_confirm: bool,
+    /// Descriptions of `pending_move_items`, displayed in the confirmation dialog.
+    pub move_confirm_items: Vec<String>,
 }
 
 // ── Construction ──────────────────────────────────────────────────────────────
@@ -157,6 +179,11 @@ impl S3ExplorerApp {
             delete_confirm_items: Vec::new(),
             pending_delete_jobs: Vec::new(),
             fatal_error: None,
+            move_followups: HashMap::new(),
+            move_scan: None,
+            pending_move_items: Vec::new(),
+            show_move_confirm: false,
+            move_confirm_items: Vec::new(),
         };
 
         app.load_local_directory(&local_path);
@@ -292,7 +319,11 @@ impl S3ExplorerApp {
 
     /// Walk `local_root` recursively and enqueue an `Upload` job for every file
     /// found, using the current S3 bucket and prefix as the destination.
-    pub fn start_folder_upload(&mut self, local_root: &std::path::Path) {
+    ///
+    /// `is_move` is threaded through to `AppMsg::FolderScanComplete` so the
+    /// message handler knows whether to delete each source file once its
+    /// upload succeeds.
+    pub fn start_folder_upload(&mut self, local_root: &std::path::Path, is_move: bool) {
         if self.s3_location.bucket.is_empty() {
             "Select an S3 bucket before uploading a folder.".clone_into(&mut self.status_message);
             return;
@@ -313,6 +344,7 @@ impl S3ExplorerApp {
                         local_root: root,
                         s3_prefix,
                         bucket,
+                        is_move,
                     })
                     .ok();
                 }
@@ -333,7 +365,11 @@ impl S3ExplorerApp {
     /// (e.g. `"photos/2023/Italy/"`). The current browsing prefix
     /// (`self.s3_location.prefix`) is stripped from each key to produce the
     /// relative local path.
-    pub fn start_folder_download(&mut self, s3_folder_prefix: &str) {
+    ///
+    /// `is_move` is threaded through to `AppMsg::S3RecursiveListComplete` so
+    /// the message handler knows whether to delete each source object once
+    /// its download succeeds.
+    pub fn start_folder_download(&mut self, s3_folder_prefix: &str, is_move: bool) {
         let bucket = self.s3_location.bucket.clone();
         let s3_prefix = self.s3_location.prefix.clone();
         let folder_prefix = s3_folder_prefix.to_owned();
@@ -354,6 +390,7 @@ impl S3ExplorerApp {
                         local_root,
                         s3_prefix,
                         bucket,
+                        is_move,
                     })
                     .ok();
                 }
@@ -436,6 +473,189 @@ impl S3ExplorerApp {
         self.delete_confirm_items.clear();
         self.show_delete_confirm = false;
     }
+
+    /// Begin a drag-and-drop move: seed with plain files whose size is
+    /// already known, and wait for `dir_count` recursive folder scans (if
+    /// any) before finalizing.
+    ///
+    /// Only called from `handle_local_payload_dropped_on_s3` and
+    /// `handle_s3_payload_dropped_on_local`, which are themselves wired up
+    /// to the UI in a later task — until then this is reachable only via
+    /// those two entry points, hence `#[allow(dead_code)]`.
+    #[allow(dead_code)]
+    fn begin_move(&mut self, plain: Vec<(TransferJob, TransferKind)>, dir_count: usize) {
+        self.move_scan = Some(PendingMoveScan {
+            scans_outstanding: dir_count,
+            items: plain,
+        });
+        if dir_count == 0 {
+            self.finalize_move_scan();
+        }
+    }
+
+    /// Record one recursive folder scan's results against the in-flight
+    /// move, finalizing once every outstanding scan has reported back.
+    fn record_move_scan_result(&mut self, items: Vec<(TransferJob, TransferKind)>) {
+        if let Some(scan) = self.move_scan.as_mut() {
+            scan.items.extend(items);
+            scan.scans_outstanding = scan.scans_outstanding.saturating_sub(1);
+            if scan.scans_outstanding == 0 {
+                self.finalize_move_scan();
+            }
+        }
+    }
+
+    /// All scans for the current move are in: show the confirmation dialog,
+    /// or execute immediately if `confirm_before_delete` is disabled.
+    fn finalize_move_scan(&mut self) {
+        let Some(scan) = self.move_scan.take() else {
+            return;
+        };
+        self.pending_move_items = scan.items;
+        self.move_confirm_items = self
+            .pending_move_items
+            .iter()
+            .map(|(job, _)| job.description())
+            .collect();
+
+        if self.config.confirm_before_delete {
+            self.show_move_confirm = true;
+        } else {
+            self.confirm_move();
+        }
+    }
+
+    /// Confirm pending move items (from the dialog, or immediately when
+    /// `confirm_before_delete` is disabled): enqueue every copy job and
+    /// register its companion delete to fire once that copy succeeds.
+    pub fn confirm_move(&mut self) {
+        let count = self.pending_move_items.len();
+        for (job, companion) in self.pending_move_items.drain(..) {
+            self.job_tx.send(job.clone()).ok();
+            self.move_followups.insert(job.id, companion);
+            self.transfer_jobs.push(job);
+        }
+        self.move_confirm_items.clear();
+        self.show_move_confirm = false;
+        self.status_message = format!("Moving {count} item(s)…");
+    }
+
+    /// Cancel a pending move: discard everything, nothing is enqueued.
+    ///
+    /// Consumed by the move-confirmation dialog added in a later task; kept
+    /// here now so `Self`'s move API surface is complete for that task.
+    #[allow(dead_code)]
+    pub fn cancel_move(&mut self) {
+        self.pending_move_items.clear();
+        self.move_confirm_items.clear();
+        self.show_move_confirm = false;
+    }
+
+    /// Entry point for a `Local` payload dropped on the S3 pane.
+    ///
+    /// Files are enqueued (or staged for move-confirmation) directly.
+    /// Directories go through `start_folder_upload`, tagged with `is_move`
+    /// so its `AppMsg::FolderScanComplete` handler knows whether to stage
+    /// its results for move-confirmation too.
+    ///
+    /// Not yet called from the UI — wired up to drag-and-drop in a later
+    /// task, hence `#[allow(dead_code)]`.
+    #[allow(dead_code)]
+    pub fn handle_local_payload_dropped_on_s3(&mut self, entries: Vec<LocalEntry>, is_move: bool) {
+        if self.s3_location.bucket.is_empty() {
+            "Select an S3 bucket before dropping files here.".clone_into(&mut self.status_message);
+            return;
+        }
+        let bucket = self.s3_location.bucket.clone();
+        let s3_prefix = self.s3_location.prefix.clone();
+
+        let mut plain: Vec<(TransferJob, TransferKind)> = Vec::new();
+        let mut dir_count = 0usize;
+
+        for entry in entries {
+            match entry.kind {
+                EntryKind::File => {
+                    let key = format!("{s3_prefix}{}", entry.name);
+                    let kind = TransferKind::Upload {
+                        local: entry.path.clone(),
+                        bucket: bucket.clone(),
+                        key,
+                    };
+                    if is_move {
+                        let job = TransferJob {
+                            id: self.alloc_job_id(),
+                            kind,
+                            size_bytes: entry.size_bytes,
+                            status: TransferStatus::Queued,
+                        };
+                        plain.push((job, TransferKind::DeleteLocal { path: entry.path }));
+                    } else {
+                        self.enqueue_transfer(kind, entry.size_bytes);
+                    }
+                }
+                EntryKind::Directory => {
+                    dir_count += 1;
+                    self.start_folder_upload(&entry.path, is_move);
+                }
+            }
+        }
+
+        if is_move {
+            self.begin_move(plain, dir_count);
+        }
+    }
+
+    /// Entry point for an `S3` payload dropped on the Local pane. Mirrors
+    /// `handle_local_payload_dropped_on_s3` for the opposite direction.
+    ///
+    /// Not yet called from the UI — wired up to drag-and-drop in a later
+    /// task, hence `#[allow(dead_code)]`.
+    #[allow(dead_code)]
+    pub fn handle_s3_payload_dropped_on_local(&mut self, entries: Vec<S3Entry>, is_move: bool) {
+        let bucket = self.s3_location.bucket.clone();
+        let local_root = self.local_path.clone();
+
+        let mut plain: Vec<(TransferJob, TransferKind)> = Vec::new();
+        let mut dir_count = 0usize;
+
+        for entry in entries {
+            match entry.kind {
+                EntryKind::File => {
+                    let local = local_root.join(&entry.name);
+                    let kind = TransferKind::Download {
+                        bucket: bucket.clone(),
+                        key: entry.key.clone(),
+                        local,
+                    };
+                    if is_move {
+                        let job = TransferJob {
+                            id: self.alloc_job_id(),
+                            kind,
+                            size_bytes: entry.size_bytes,
+                            status: TransferStatus::Queued,
+                        };
+                        plain.push((
+                            job,
+                            TransferKind::DeleteRemote {
+                                bucket: bucket.clone(),
+                                key: entry.key,
+                            },
+                        ));
+                    } else {
+                        self.enqueue_transfer(kind, entry.size_bytes);
+                    }
+                }
+                EntryKind::Directory => {
+                    dir_count += 1;
+                    self.start_folder_download(&entry.key, is_move);
+                }
+            }
+        }
+
+        if is_move {
+            self.begin_move(plain, dir_count);
+        }
+    }
 }
 
 // ── Message handling ──────────────────────────────────────────────────────────
@@ -495,6 +715,9 @@ impl S3ExplorerApp {
                 if let Some(job) = self.transfer_jobs.iter_mut().find(|j| j.id == id) {
                     job.status = TransferStatus::Done;
                 }
+                if let Some(companion) = self.move_followups.remove(&id) {
+                    self.enqueue_transfer(companion, 0);
+                }
                 self.prune_completed();
             }
             AppMsg::TransferFailed { id, error } => {
@@ -508,6 +731,7 @@ impl S3ExplorerApp {
                 local_root,
                 s3_prefix,
                 bucket,
+                is_move,
             } => {
                 let count = files.len();
                 // Include the uploaded folder's own name in the S3 prefix so that
@@ -523,6 +747,7 @@ impl S3ExplorerApp {
                 } else {
                     format!("{s3_prefix}{folder_name}/")
                 };
+                let mut move_items: Vec<(TransferJob, TransferKind)> = Vec::new();
                 for (path, size) in files {
                     // Relative path inside the scanned folder, with forward slashes.
                     let rel = path
@@ -530,27 +755,41 @@ impl S3ExplorerApp {
                         .map(|r| r.to_string_lossy().replace('\\', "/"))
                         .unwrap_or_default();
                     let key = format!("{dest_prefix}{rel}");
-                    self.enqueue_transfer(
-                        TransferKind::Upload {
-                            local: path,
-                            bucket: bucket.clone(),
-                            key,
-                        },
-                        size,
+                    let kind = TransferKind::Upload {
+                        local: path.clone(),
+                        bucket: bucket.clone(),
+                        key,
+                    };
+                    if is_move {
+                        let job = TransferJob {
+                            id: self.alloc_job_id(),
+                            kind,
+                            size_bytes: size,
+                            status: TransferStatus::Queued,
+                        };
+                        move_items.push((job, TransferKind::DeleteLocal { path }));
+                    } else {
+                        self.enqueue_transfer(kind, size);
+                    }
+                }
+                if is_move {
+                    self.record_move_scan_result(move_items);
+                } else {
+                    self.status_message = format!(
+                        "Queued {count} file(s) → S3: {dest_prefix} \
+                         (navigate to that prefix in S3 pane to see them)"
                     );
                 }
-                self.status_message = format!(
-                    "Queued {count} file(s) → S3: {dest_prefix} \
-                     (navigate to that prefix in S3 pane to see them)"
-                );
             }
             AppMsg::S3RecursiveListComplete {
                 objects,
                 local_root,
                 s3_prefix,
                 bucket,
+                is_move,
             } => {
                 let count = objects.len();
+                let mut move_items: Vec<(TransferJob, TransferKind)> = Vec::new();
                 for (key, size) in objects {
                     // Strip the browsing prefix to get the relative path, then
                     // build a native OS path by splitting on '/'.
@@ -562,16 +801,34 @@ impl S3ExplorerApp {
                             p
                         },
                     );
-                    self.enqueue_transfer(
-                        TransferKind::Download {
-                            bucket: bucket.clone(),
-                            key,
-                            local: local_path,
-                        },
-                        size,
-                    );
+                    let kind = TransferKind::Download {
+                        bucket: bucket.clone(),
+                        key: key.clone(),
+                        local: local_path,
+                    };
+                    if is_move {
+                        let job = TransferJob {
+                            id: self.alloc_job_id(),
+                            kind,
+                            size_bytes: size,
+                            status: TransferStatus::Queued,
+                        };
+                        move_items.push((
+                            job,
+                            TransferKind::DeleteRemote {
+                                bucket: bucket.clone(),
+                                key,
+                            },
+                        ));
+                    } else {
+                        self.enqueue_transfer(kind, size);
+                    }
                 }
-                self.status_message = format!("Queued {count} object(s) for download");
+                if is_move {
+                    self.record_move_scan_result(move_items);
+                } else {
+                    self.status_message = format!("Queued {count} object(s) for download");
+                }
             }
             AppMsg::BackgroundError(e) => {
                 error!("Background error: {e}");
