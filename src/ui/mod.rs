@@ -1,5 +1,6 @@
 //! UI module: re-exports and shared helpers.
 
+pub mod dnd;
 pub mod local_pane;
 pub mod s3_pane;
 pub mod toolbar;
