@@ -479,10 +479,7 @@ impl S3ExplorerApp {
     /// any) before finalizing.
     ///
     /// Only called from `handle_local_payload_dropped_on_s3` and
-    /// `handle_s3_payload_dropped_on_local`, which are themselves wired up
-    /// to the UI in a later task — until then this is reachable only via
-    /// those two entry points, hence `#[allow(dead_code)]`.
-    #[allow(dead_code)]
+    /// `handle_s3_payload_dropped_on_local`.
     fn begin_move(&mut self, plain: Vec<(TransferJob, TransferKind)>, dir_count: usize) {
         self.move_scan = Some(PendingMoveScan {
             scans_outstanding: dir_count,
@@ -542,9 +539,7 @@ impl S3ExplorerApp {
 
     /// Cancel a pending move: discard everything, nothing is enqueued.
     ///
-    /// Consumed by the move-confirmation dialog added in a later task; kept
-    /// here now so `Self`'s move API surface is complete for that task.
-    #[allow(dead_code)]
+    /// Consumed by the move-confirmation dialog.
     pub fn cancel_move(&mut self) {
         self.pending_move_items.clear();
         self.move_confirm_items.clear();
@@ -557,10 +552,6 @@ impl S3ExplorerApp {
     /// Directories go through `start_folder_upload`, tagged with `is_move`
     /// so its `AppMsg::FolderScanComplete` handler knows whether to stage
     /// its results for move-confirmation too.
-    ///
-    /// Not yet called from the UI — wired up to drag-and-drop in a later
-    /// task, hence `#[allow(dead_code)]`.
-    #[allow(dead_code)]
     pub fn handle_local_payload_dropped_on_s3(&mut self, entries: Vec<LocalEntry>, is_move: bool) {
         if self.s3_location.bucket.is_empty() {
             "Select an S3 bucket before dropping files here.".clone_into(&mut self.status_message);
@@ -607,10 +598,6 @@ impl S3ExplorerApp {
 
     /// Entry point for an `S3` payload dropped on the Local pane. Mirrors
     /// `handle_local_payload_dropped_on_s3` for the opposite direction.
-    ///
-    /// Not yet called from the UI — wired up to drag-and-drop in a later
-    /// task, hence `#[allow(dead_code)]`.
-    #[allow(dead_code)]
     pub fn handle_s3_payload_dropped_on_local(&mut self, entries: Vec<S3Entry>, is_move: bool) {
         let bucket = self.s3_location.bucket.clone();
         let local_root = self.local_path.clone();
@@ -724,6 +711,7 @@ impl S3ExplorerApp {
                 if let Some(job) = self.transfer_jobs.iter_mut().find(|j| j.id == id) {
                     job.status = TransferStatus::Failed(error.clone());
                 }
+                self.move_followups.remove(&id);
                 self.status_message = format!("Transfer failed: {error}");
             }
             AppMsg::FolderScanComplete {
