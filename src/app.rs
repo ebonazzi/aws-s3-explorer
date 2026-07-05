@@ -974,6 +974,35 @@ impl S3ExplorerApp {
         }
     }
 
+    fn draw_move_confirm_dialog(&mut self, ui: &mut egui::Ui) {
+        let mut open = self.show_move_confirm;
+        egui::Window::new("Confirm Move")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .show(ui.ctx(), |ui| {
+                ui.label("Copy the following items, then delete them from the source?");
+                egui::ScrollArea::vertical()
+                    .max_height(200.0)
+                    .show(ui, |ui| {
+                        for item in &self.move_confirm_items {
+                            ui.label(item);
+                        }
+                    });
+                ui.horizontal(|ui| {
+                    if ui.button("Move").clicked() {
+                        self.confirm_move();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.cancel_move();
+                    }
+                });
+            });
+        if !open {
+            self.cancel_move();
+        }
+    }
+
     fn draw_fatal_error(&mut self, ui: &mut egui::Ui) {
         if let Some(ref msg) = self.fatal_error.clone() {
             egui::Window::new("Startup Error")
@@ -1014,6 +1043,9 @@ impl eframe::App for S3ExplorerApp {
         }
         if self.show_delete_confirm {
             self.draw_delete_confirm_dialog(ui);
+        }
+        if self.show_move_confirm {
+            self.draw_move_confirm_dialog(ui);
         }
     }
 
