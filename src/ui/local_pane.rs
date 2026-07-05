@@ -55,85 +55,97 @@ pub fn draw(app: &mut S3ExplorerApp, ui: &mut egui::Ui) {
     let bucket = app.s3_location.bucket.clone();
     let has_bucket = !bucket.is_empty();
 
-    TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .auto_shrink(false) // fill the panel's full height so the resize handle works
-        .column(Column::auto()) // icon
-        .column(Column::remainder()) // name
-        .column(Column::initial(80.0)) // size
-        .column(Column::initial(140.0)) // modified
-        .header(20.0, |mut header| {
-            header.col(|_ui| {});
-            header.col(|ui| {
-                ui.strong("Name");
-            });
-            header.col(|ui| {
-                ui.strong("Size");
-            });
-            header.col(|ui| {
-                ui.strong("Modified");
-            });
-        })
-        .body(|mut body| {
-            for entry in &entries {
-                let is_selected = selected.contains(&entry.path);
-                let entry_path = entry.path.clone();
-                let entry_name = entry.name.clone();
-                let entry_kind = entry.kind;
-                let entry_size = entry.size_bytes;
-                let entry_mtime = entry.modified;
-                let key_for_copy = format!("{prefix}{entry_name}");
+    // Dropping a `Local` payload here (an S3 payload dropped back onto the
+    // Local pane) is intentionally ignored below — only cross-pane drops act.
+    let (_, dropped) = ui.dnd_drop_zone::<ui::dnd::DragPayload, _>(egui::Frame::NONE, |ui| {
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .auto_shrink(false) // fill the panel's full height so the resize handle works
+            .column(Column::auto()) // icon
+            .column(Column::remainder()) // name
+            .column(Column::initial(80.0)) // size
+            .column(Column::initial(140.0)) // modified
+            .header(20.0, |mut header| {
+                header.col(|_ui| {});
+                header.col(|ui| {
+                    ui.strong("Name");
+                });
+                header.col(|ui| {
+                    ui.strong("Size");
+                });
+                header.col(|ui| {
+                    ui.strong("Modified");
+                });
+            })
+            .body(|mut body| {
+                for entry in &entries {
+                    let is_selected = selected.contains(&entry.path);
+                    let entry_path = entry.path.clone();
+                    let entry_name = entry.name.clone();
+                    let entry_kind = entry.kind;
+                    let entry_size = entry.size_bytes;
+                    let entry_mtime = entry.modified;
+                    let key_for_copy = format!("{prefix}{entry_name}");
+                    let drag_set = ui::dnd::effective_local_drag_set(entry, &selected, &entries);
+                    let drag_id = egui::Id::new("local_row").with(&entry_path);
 
-                body.row(18.0, |mut row| {
-                    row.col(|ui| {
-                        ui.label(ui::kind_icon(entry_kind));
-                    });
-                    row.col(|ui| {
-                        let resp = ui.selectable_label(is_selected, &entry_name);
+                    body.row(18.0, |mut row| {
+                        row.col(|ui| {
+                            ui.label(ui::kind_icon(entry_kind));
+                        });
+                        row.col(|ui| {
+                            let resp = ui
+                                .dnd_drag_source(
+                                    drag_id,
+                                    ui::dnd::DragPayload::Local(drag_set),
+                                    |ui| ui.selectable_label(is_selected, &entry_name),
+                                )
+                                .inner;
 
-                        if resp.double_clicked() && entry_kind == EntryKind::Directory {
-                            nav_path = Some(entry_path.clone());
-                        } else if resp.clicked() {
-                            toggle_path = Some(entry_path.clone());
-                        }
+                            if resp.double_clicked() && entry_kind == EntryKind::Directory {
+                                nav_path = Some(entry_path.clone());
+                            } else if resp.clicked() {
+                                toggle_path = Some(entry_path.clone());
+                            }
 
-                        resp.context_menu(|ui| {
+                            resp.context_menu(|ui| {
+                                if entry_kind == EntryKind::File {
+                                    if ui.button("Copy to S3").clicked() {
+                                        copy_to_s3.push((
+                                            entry_path.clone(),
+                                            key_for_copy.clone(),
+                                            entry_size,
+                                        ));
+                                        ui.close();
+                                    }
+                                    if ui.button("Delete").clicked() {
+                                        delete_paths.push(entry_path.clone());
+                                        ui.close();
+                                    }
+                                } else if has_bucket {
+                                    if ui.button("Upload folder to S3 →").clicked() {
+                                        upload_folder = Some(entry_path.clone());
+                                        ui.close();
+                                    }
+                                    ui.weak("(uploads all files recursively)");
+                                } else {
+                                    ui.weak("Select an S3 bucket first");
+                                }
+                            });
+                        });
+                        row.col(|ui| {
                             if entry_kind == EntryKind::File {
-                                if ui.button("Copy to S3").clicked() {
-                                    copy_to_s3.push((
-                                        entry_path.clone(),
-                                        key_for_copy.clone(),
-                                        entry_size,
-                                    ));
-                                    ui.close();
-                                }
-                                if ui.button("Delete").clicked() {
-                                    delete_paths.push(entry_path.clone());
-                                    ui.close();
-                                }
-                            } else if has_bucket {
-                                if ui.button("Upload folder to S3 →").clicked() {
-                                    upload_folder = Some(entry_path.clone());
-                                    ui.close();
-                                }
-                                ui.weak("(uploads all files recursively)");
-                            } else {
-                                ui.weak("Select an S3 bucket first");
+                                ui.label(ui::format_bytes(entry_size));
                             }
                         });
+                        row.col(|ui| {
+                            ui.label(entry_mtime.format("%Y-%m-%d %H:%M").to_string());
+                        });
                     });
-                    row.col(|ui| {
-                        if entry_kind == EntryKind::File {
-                            ui.label(ui::format_bytes(entry_size));
-                        }
-                    });
-                    row.col(|ui| {
-                        ui.label(entry_mtime.format("%Y-%m-%d %H:%M").to_string());
-                    });
-                });
-            }
-        });
+                }
+            });
+    });
 
     // Apply accumulated actions after the table is done.
     if let Some(path) = nav_path {
@@ -165,5 +177,12 @@ pub fn draw(app: &mut S3ExplorerApp, ui: &mut egui::Ui) {
 
     if !delete_paths.is_empty() {
         app.request_delete_local(delete_paths);
+    }
+
+    if let Some(payload) = dropped
+        && let ui::dnd::DragPayload::S3(items) = payload.as_ref().clone()
+    {
+        let is_move = ui.input(|i| i.modifiers.shift);
+        app.handle_s3_payload_dropped_on_local(items, is_move);
     }
 }
