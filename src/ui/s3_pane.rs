@@ -114,88 +114,100 @@ fn draw_prefix_contents(app: &mut S3ExplorerApp, ui: &mut egui::Ui) {
     let mut delete_items: Vec<(String, String)> = Vec::new(); // (bucket, key)
     let mut download_folder: Option<String> = None; // S3 prefix to download recursively
 
-    TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .auto_shrink(false)
-        .column(Column::auto()) // icon
-        .column(Column::remainder()) // name
-        .column(Column::initial(80.0)) // size
-        .column(Column::initial(160.0)) // last modified
-        .header(20.0, |mut header| {
-            header.col(|_ui| {});
-            header.col(|ui| {
-                ui.strong("Name");
-            });
-            header.col(|ui| {
-                ui.strong("Size");
-            });
-            header.col(|ui| {
-                ui.strong("Last Modified");
-            });
-        })
-        .body(|mut body| {
-            for entry in &entries {
-                let is_selected = selected.contains(&entry.key);
-                let entry_key = entry.key.clone();
-                let entry_name = entry.name.clone();
-                let entry_kind = entry.kind;
-                let entry_size = entry.size_bytes;
-                let entry_mtime = entry.last_modified;
-                let bucket_for_action = bucket.clone();
-                let loc_for_nav = current_loc.clone();
+    // Dropping an `S3` payload here (a Local payload dropped back onto the
+    // S3 pane) is intentionally ignored below — only cross-pane drops act.
+    let (_, dropped) = ui.dnd_drop_zone::<ui::dnd::DragPayload, _>(egui::Frame::NONE, |ui| {
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .auto_shrink(false)
+            .column(Column::auto()) // icon
+            .column(Column::remainder()) // name
+            .column(Column::initial(80.0)) // size
+            .column(Column::initial(160.0)) // last modified
+            .header(20.0, |mut header| {
+                header.col(|_ui| {});
+                header.col(|ui| {
+                    ui.strong("Name");
+                });
+                header.col(|ui| {
+                    ui.strong("Size");
+                });
+                header.col(|ui| {
+                    ui.strong("Last Modified");
+                });
+            })
+            .body(|mut body| {
+                for entry in &entries {
+                    let is_selected = selected.contains(&entry.key);
+                    let entry_key = entry.key.clone();
+                    let entry_name = entry.name.clone();
+                    let entry_kind = entry.kind;
+                    let entry_size = entry.size_bytes;
+                    let entry_mtime = entry.last_modified;
+                    let bucket_for_action = bucket.clone();
+                    let loc_for_nav = current_loc.clone();
+                    let drag_set = ui::dnd::effective_s3_drag_set(entry, &selected, &entries);
+                    let drag_id = egui::Id::new("s3_row").with(&entry_key);
 
-                body.row(18.0, |mut row| {
-                    row.col(|ui| {
-                        ui.label(ui::kind_icon(entry_kind));
-                    });
-                    row.col(|ui| {
-                        let resp = ui.selectable_label(is_selected, &entry_name);
+                    body.row(18.0, |mut row| {
+                        row.col(|ui| {
+                            ui.label(ui::kind_icon(entry_kind));
+                        });
+                        row.col(|ui| {
+                            let resp = ui
+                                .dnd_drag_source(
+                                    drag_id,
+                                    ui::dnd::DragPayload::S3(drag_set),
+                                    |ui| ui.selectable_label(is_selected, &entry_name),
+                                )
+                                .inner;
 
-                        if resp.double_clicked() && entry_kind == EntryKind::Directory {
-                            navigate_to = Some(loc_for_nav.enter(&entry_name));
-                        } else if resp.clicked() {
-                            toggle_key = Some(entry_key.clone());
-                        }
+                            if resp.double_clicked() && entry_kind == EntryKind::Directory {
+                                navigate_to = Some(loc_for_nav.enter(&entry_name));
+                            } else if resp.clicked() {
+                                toggle_key = Some(entry_key.clone());
+                            }
 
-                        resp.context_menu(|ui| {
+                            resp.context_menu(|ui| {
+                                if entry_kind == EntryKind::File {
+                                    if ui.button("Download").clicked() {
+                                        download_items.push((
+                                            entry_key.clone(),
+                                            entry_name.clone(),
+                                            entry_size,
+                                        ));
+                                        ui.close();
+                                    }
+                                    if ui.button("Delete").clicked() {
+                                        delete_items
+                                            .push((bucket_for_action.clone(), entry_key.clone()));
+                                        ui.close();
+                                    }
+                                } else {
+                                    // Directory/prefix
+                                    if ui.button("Download folder to local ↓").clicked() {
+                                        download_folder = Some(entry_key.clone());
+                                        ui.close();
+                                    }
+                                    ui.weak("(downloads all objects recursively)");
+                                }
+                            });
+                        });
+                        row.col(|ui| {
                             if entry_kind == EntryKind::File {
-                                if ui.button("Download").clicked() {
-                                    download_items.push((
-                                        entry_key.clone(),
-                                        entry_name.clone(),
-                                        entry_size,
-                                    ));
-                                    ui.close();
-                                }
-                                if ui.button("Delete").clicked() {
-                                    delete_items
-                                        .push((bucket_for_action.clone(), entry_key.clone()));
-                                    ui.close();
-                                }
-                            } else {
-                                // Directory/prefix
-                                if ui.button("Download folder to local ↓").clicked() {
-                                    download_folder = Some(entry_key.clone());
-                                    ui.close();
-                                }
-                                ui.weak("(downloads all objects recursively)");
+                                ui.label(ui::format_bytes(entry_size));
+                            }
+                        });
+                        row.col(|ui| {
+                            if let Some(mtime) = entry_mtime {
+                                ui.label(mtime.format("%Y-%m-%d %H:%M").to_string());
                             }
                         });
                     });
-                    row.col(|ui| {
-                        if entry_kind == EntryKind::File {
-                            ui.label(ui::format_bytes(entry_size));
-                        }
-                    });
-                    row.col(|ui| {
-                        if let Some(mtime) = entry_mtime {
-                            ui.label(mtime.format("%Y-%m-%d %H:%M").to_string());
-                        }
-                    });
-                });
-            }
-        });
+                }
+            });
+    });
 
     // Apply accumulated actions.
     if let Some(loc) = navigate_to {
@@ -226,6 +238,13 @@ fn draw_prefix_contents(app: &mut S3ExplorerApp, ui: &mut egui::Ui) {
 
     if let Some(folder_prefix) = download_folder {
         app.start_folder_download(&folder_prefix, false);
+    }
+
+    if let Some(payload) = dropped
+        && let ui::dnd::DragPayload::Local(items) = payload.as_ref().clone()
+    {
+        let is_move = ui.input(|i| i.modifiers.shift);
+        app.handle_local_payload_dropped_on_s3(items, is_move);
     }
 }
 
