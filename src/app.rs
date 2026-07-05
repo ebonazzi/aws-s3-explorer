@@ -699,11 +699,37 @@ impl S3ExplorerApp {
                 }
             }
             AppMsg::TransferDone(id) => {
+                // Auto-refresh whichever pane the completed transfer landed in,
+                // if that pane is currently browsing the affected location.
+                let mut refresh_s3 = false;
+                let mut refresh_local = false;
                 if let Some(job) = self.transfer_jobs.iter_mut().find(|j| j.id == id) {
                     job.status = TransferStatus::Done;
+                    match &job.kind {
+                        TransferKind::Upload { bucket, key, .. } => {
+                            refresh_s3 = *bucket == self.s3_location.bucket
+                                && key.starts_with(self.s3_location.prefix.as_str());
+                        }
+                        TransferKind::DeleteRemote { bucket, key } => {
+                            refresh_s3 = *bucket == self.s3_location.bucket
+                                && key.starts_with(self.s3_location.prefix.as_str());
+                        }
+                        TransferKind::Download { local, .. } => {
+                            refresh_local = local.parent() == Some(self.local_path.as_path());
+                        }
+                        TransferKind::DeleteLocal { path } => {
+                            refresh_local = path.parent() == Some(self.local_path.as_path());
+                        }
+                    }
                 }
                 if let Some(companion) = self.move_followups.remove(&id) {
                     self.enqueue_transfer(companion, 0);
+                }
+                if refresh_s3 {
+                    self.load_s3_prefix(&self.s3_location.clone());
+                }
+                if refresh_local {
+                    self.load_local_directory(&self.local_path.clone());
                 }
                 self.prune_completed();
             }
