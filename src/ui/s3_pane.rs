@@ -148,20 +148,24 @@ fn draw_prefix_contents(app: &mut S3ExplorerApp, ui: &mut egui::Ui) {
                     let bucket_for_action = bucket.clone();
                     let loc_for_nav = current_loc.clone();
                     let drag_set = ui::dnd::effective_s3_drag_set(entry, &selected, &entries);
-                    let drag_id = egui::Id::new("s3_row").with(&entry_key);
 
                     body.row(18.0, |mut row| {
                         row.col(|ui| {
                             ui.label(ui::kind_icon(entry_kind));
                         });
                         row.col(|ui| {
-                            let resp = ui
-                                .dnd_drag_source(
-                                    drag_id,
-                                    ui::dnd::DragPayload::S3(drag_set),
-                                    |ui| ui.selectable_label(is_selected, &entry_name),
-                                )
-                                .inner;
+                            // A single widget must sense both click and drag here.
+                            // Wrapping a click-sensing widget (selectable_label) inside
+                            // a separate drag-only interact region (as `dnd_drag_source`
+                            // does) makes egui's hit-test permanently hide the click
+                            // behind the drag region — see hit_test.rs's
+                            // `(Some(hit_click), Some(hit_drag))` branch: a top widget
+                            // that senses only drag discards the click hit entirely.
+                            let resp = ui.add(
+                                egui::Button::selectable(is_selected, &entry_name)
+                                    .sense(egui::Sense::click_and_drag()),
+                            );
+                            resp.dnd_set_drag_payload(ui::dnd::DragPayload::S3(drag_set));
 
                             if resp.double_clicked() && entry_kind == EntryKind::Directory {
                                 navigate_to = Some(loc_for_nav.enter(&entry_name));

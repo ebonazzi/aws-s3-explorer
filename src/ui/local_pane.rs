@@ -88,20 +88,24 @@ pub fn draw(app: &mut S3ExplorerApp, ui: &mut egui::Ui) {
                     let entry_mtime = entry.modified;
                     let key_for_copy = format!("{prefix}{entry_name}");
                     let drag_set = ui::dnd::effective_local_drag_set(entry, &selected, &entries);
-                    let drag_id = egui::Id::new("local_row").with(&entry_path);
 
                     body.row(18.0, |mut row| {
                         row.col(|ui| {
                             ui.label(ui::kind_icon(entry_kind));
                         });
                         row.col(|ui| {
-                            let resp = ui
-                                .dnd_drag_source(
-                                    drag_id,
-                                    ui::dnd::DragPayload::Local(drag_set),
-                                    |ui| ui.selectable_label(is_selected, &entry_name),
-                                )
-                                .inner;
+                            // A single widget must sense both click and drag here.
+                            // Wrapping a click-sensing widget (selectable_label) inside
+                            // a separate drag-only interact region (as `dnd_drag_source`
+                            // does) makes egui's hit-test permanently hide the click
+                            // behind the drag region — see hit_test.rs's
+                            // `(Some(hit_click), Some(hit_drag))` branch: a top widget
+                            // that senses only drag discards the click hit entirely.
+                            let resp = ui.add(
+                                egui::Button::selectable(is_selected, &entry_name)
+                                    .sense(egui::Sense::click_and_drag()),
+                            );
+                            resp.dnd_set_drag_payload(ui::dnd::DragPayload::Local(drag_set));
 
                             if resp.double_clicked() && entry_kind == EntryKind::Directory {
                                 nav_path = Some(entry_path.clone());
