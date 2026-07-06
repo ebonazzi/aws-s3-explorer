@@ -48,11 +48,15 @@ fn main() -> anyhow::Result<()> {
     // Resolve credentials once at startup before the GUI takes over.
     let s3_client = runtime.block_on(s3::client::build_client())?;
 
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
+        .expect("embedded assets/icon.png is a valid PNG (guarded by embedded_icon_decodes test)");
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("AWS S3 Explorer")
             .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([800.0, 500.0]),
+            .with_min_inner_size([800.0, 500.0])
+            .with_icon(icon),
         ..Default::default()
     };
 
@@ -72,4 +76,18 @@ fn main() -> anyhow::Result<()> {
 
     Ok(())
     // runtime drops here — all tokio tasks cancelled cleanly.
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn embedded_icon_decodes() {
+        let bytes = include_bytes!("../assets/icon.png");
+        let result = eframe::icon_data::from_png_bytes(bytes);
+        assert!(
+            result.is_ok(),
+            "embedded assets/icon.png failed to decode: {:?}",
+            result.err()
+        );
+    }
 }
