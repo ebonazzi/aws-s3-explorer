@@ -68,7 +68,8 @@ New `build.rs` at the project root:
 
 ```rust
 fn main() {
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+    #[cfg(target_os = "windows")]
+    {
         winresource::WindowsResource::new()
             .set_icon("assets/icon.ico")
             .compile()
@@ -76,6 +77,17 @@ fn main() {
     }
 }
 ```
+
+This must be a compile-time `#[cfg(target_os = "windows")]` gate, not a
+runtime `if std::env::var("CARGO_CFG_TARGET_OS") == ...` check. Since
+`winresource` is declared as a **target-gated** build-dependency (only
+present in the dependency graph when building for Windows), a runtime `if`
+would still require the compiler to resolve `winresource::WindowsResource`
+as a valid path on every platform — which fails to compile on Linux/macOS,
+where the crate isn't a dependency at all. `#[cfg(...)]` compiles the block
+out entirely on non-Windows targets, so the reference never needs to
+resolve there. (Discovered during implementation — see the corresponding
+note in the implementation plan.)
 
 `Cargo.toml` adds `winresource` as a **Windows-only** build-dependency, so
 it is never even compiled on Linux/macOS:
