@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=AWS S3 Explorer
+Comment=Personal AWS S3 / local file manager
+Exec=__EXEC_PATH__
+Icon=__ICON_PATH__
+Terminal=false
+Categories=Utility;FileTools;
