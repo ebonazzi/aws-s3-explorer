@@ -100,3 +100,8 @@ strip = true        # strip debug symbols (reduces binary size on Linux)
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+
+[package.metadata.bundle]
+name = "AWS S3 Explorer"
+identifier = "com.ebonazzi.aws-s3-explorer"
+icon = ["assets/icon.icns"]
